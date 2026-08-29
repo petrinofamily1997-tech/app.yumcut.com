@@ -9,6 +9,7 @@ load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YUMCUT_URL = os.getenv("YUMCUT_URL", "http://localhost:3000")
+YUMCUT_API_KEY = os.getenv("YUMCUT_API_KEY", "test")  # Добавлено!
 
 def choose_topic():
     topics = [
@@ -35,7 +36,6 @@ def generate_script(topic):
     return {"title": topic, "script": script}
 
 def create_video_with_yumcut(title, script):
-    """Реально отправляет видео в YumCut и получает результат"""
     print("🎬 Sending to YumCut...")
     
     project_data = {
@@ -45,12 +45,16 @@ def create_video_with_yumcut(title, script):
         "captionsEnabled": True
     }
     
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {YUMCUT_API_KEY}"  # Добавлено!
+    }
+    
     try:
-        # Создаем проект
         resp = requests.post(
             f"{YUMCUT_URL}/api/user/v1/projects",
             json=project_data,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             timeout=60
         )
         
@@ -61,8 +65,7 @@ def create_video_with_yumcut(title, script):
         project_id = resp.json()["id"]
         print(f"✅ Project created: {project_id}")
         
-        # Ждем завершения
-        print("⏳ Waiting for video generation (up to 10 minutes)...")
+        print("⏳ Waiting for video generation...")
         max_wait = 600
         wait_time = 0
         status = "pending"
@@ -73,7 +76,7 @@ def create_video_with_yumcut(title, script):
             
             status_resp = requests.get(
                 f"{YUMCUT_URL}/api/user/v1/projects/{project_id}/status",
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 timeout=30
             )
             
@@ -87,11 +90,10 @@ def create_video_with_yumcut(title, script):
             print(f"❌ Failed. Final status: {status}")
             return False
         
-        # Скачиваем видео
         print("📥 Downloading video...")
         download_resp = requests.get(
             f"{YUMCUT_URL}/api/user/v1/projects/{project_id}/downloads/video",
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             timeout=60
         )
         
