@@ -5,21 +5,12 @@ import requests
 from dotenv import load_dotenv
 from groq import Groq
 
-# Попытка импортировать OmniVoice. Если он не установлен, будет использован gTTS.
-try:
-    from omnivoice import OmniVoice, VoicePreset
-    OMNI_AVAILABLE = True
-except ImportError:
-    OMNI_AVAILABLE = False
-    from gtts import gTTS
-
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YUMCUT_URL = os.getenv("YUMCUT_URL", "http://localhost:3000")
 
 def choose_topic():
-    """Выбирает случайную тему для видео."""
     topics = [
         "Как инфляция в 2026 году съедает сбережения",
         "Криптовалюты: новый пузырь или будущее денег?",
@@ -30,7 +21,6 @@ def choose_topic():
     return random.choice(topics)
 
 def generate_script(topic):
-    """Генерирует сценарий для видео через Groq."""
     client = Groq(api_key=GROQ_API_KEY)
     response = client.chat.completions.create(
         model="openai/gpt-oss-120b",
@@ -44,40 +34,11 @@ def generate_script(topic):
     script = response.choices[0].message.content
     return {"title": topic, "script": script}
 
-def generate_voice(script):
-    """Генерирует голос через OmniVoice или gTTS."""
-    print("🎙️ Generating voice...")
-    tts_script = script[:5000]  # Ограничиваем длину текста
-    
-    if OMNI_AVAILABLE:
-        try:
-            print("   Using OmniVoice (free, local)...")
-            voice = OmniVoice(model="omnivoice-multilingual", device="cpu")
-            preset = VoicePreset(language="ru", gender="male", speed=1.0)
-            audio = voice.synthesize(tts_script, preset=preset, output_format="mp3")
-            with open("voiceover.mp3", "wb") as f:
-                f.write(audio)
-            print("✅ Voice generated with OmniVoice")
-            return True
-        except Exception as e:
-            print(f"⚠️ OmniVoice failed: {e}. Falling back to gTTS.")
-    
-    # Fallback на gTTS
-    try:
-        print("   Using gTTS (fallback)...")
-        tts = gTTS(text=tts_script, lang='ru', slow=False)
-        tts.save("voiceover.mp3")
-        print("✅ Voice generated with gTTS")
-        return True
-    except Exception as e:
-        print(f"❌ All TTS methods failed: {e}")
-        return False
-
 def create_video_with_yumcut(title, script):
-    """Отправляет идею в YumCut через его API."""
+    """Реально отправляет видео в YumCut и получает результат"""
     print("🎬 Sending to YumCut...")
     
-    payload = {
+    project_data = {
         "prompt": f"{title}: {script[:300]}",
         "durationSeconds": 60,
         "languages": ["ru"],
@@ -85,29 +46,71 @@ def create_video_with_yumcut(title, script):
     }
     
     try:
-        # Создаем проект в YumCut
+        # Создаем проект
         resp = requests.post(
             f"{YUMCUT_URL}/api/user/v1/projects",
-            json=payload,
+            json=project_data,
+            headers={"Content-Type": "application/json"},
             timeout=60
         )
+        
         if resp.status_code != 200:
-            print(f"❌ YumCut API error: {resp.text}")
+            print(f"❌ YumCut API error: {resp.status_code} - {resp.text}")
             return False
         
         project_id = resp.json()["id"]
         print(f"✅ Project created: {project_id}")
         
-        # Ждем генерации
-        print("⏳ Waiting for generation...")
-        for i in range(30):
-            time.sleep(30)
-            print(f"   ... {i+1}/30 minutes")
+        # Ждем завершения
+        print("⏳ Waiting for video generation (up to 10 minutes)...")
+        max_wait = 600
+        wait_time = 0
+        status = "pending"
         
-        print("✅ Video generation completed (simulated)")
+        while status in ["pending", "processing"] and wait_time < max_wait:
+            time.sleep(30)
+            wait_time += 30
+            
+            status_resp = requests.get(
+                f"{YUMCUT_URL}/api/user/v1/projects/{project_id}/status",
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
+            
+            if status_resp.status_code == 200:
+                status = status_resp.json().get("status", "pending")
+                print(f"   ⏳ Status: {status} ({wait_time}s)")
+            else:
+                print(f"   ⚠️ Status check failed")
+        
+        if status != "completed":
+            print(f"❌ Failed. Final status: {status}")
+            return False
+        
+        # Скачиваем видео
+        print("📥 Downloading video...")
+        download_resp = requests.get(
+            f"{YUMCUT_URL}/api/user/v1/projects/{project_id}/downloads/video",
+            headers={"Content-Type": "application/json"},
+            timeout=60
+        )
+        
+        if download_resp.status_code != 200:
+            print(f"❌ Failed to download: {download_resp.status_code}")
+            return False
+        
+        os.makedirs("output", exist_ok=True)
+        with open("output/video.mp4", "wb") as f:
+            f.write(download_resp.content)
+        
+        print("✅ Video saved to output/video.mp4")
         return True
+        
+    except requests.exceptions.ConnectionError:
+        print("❌ Cannot connect to YumCut server. Is it running?")
+        return False
     except Exception as e:
-        print(f"❌ YumCut error: {e}")
+        print(f"❌ Error: {e}")
         return False
 
 def main():
@@ -116,9 +119,6 @@ def main():
     
     script_data = generate_script(topic)
     print(f"📝 Script ready")
-    
-    if generate_voice(script_data["script"]):
-        print("🎵 Voice file created")
     
     create_video_with_yumcut(script_data["title"], script_data["script"])
 
