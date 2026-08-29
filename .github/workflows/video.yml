@@ -1,0 +1,63 @@
+name: YumCut Video Bot
+
+on:
+  schedule:
+    - cron: "0 */5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yumcut-video-bot
+  cancel-in-progress: false
+
+jobs:
+  create-video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check YumCut API access
+        env:
+          YUMCUT_BASE_URL: ${{ secrets.YUMCUT_BASE_URL }}
+          YUMCUT_API_KEY: ${{ secrets.YUMCUT_API_KEY }}
+        run: python video_bot.py --check
+
+      - name: Generate video
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          YUMCUT_BASE_URL: ${{ secrets.YUMCUT_BASE_URL }}
+          YUMCUT_API_KEY: ${{ secrets.YUMCUT_API_KEY }}
+          VIDEO_DURATION_SECONDS: "60"
+          VIDEO_LANGUAGE: "ru"
+        run: python video_bot.py
+
+      - name: Verify generated file
+        run: |
+          test -s output/video.mp4
+          file output/video.mp4
+          ls -lh output/video.mp4
+
+      - name: Upload video
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yumcut-video-${{ github.run_number }}
+          path: output/video.mp4
+          if-no-files-found: error
+          retention-days: 7
