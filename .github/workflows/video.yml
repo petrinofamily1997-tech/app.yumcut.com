@@ -31,6 +31,10 @@ jobs:
           npm install
           npx prisma generate
           npm run build
+        env:
+          DATABASE_URL: "file:./dev.db"
+          NEXTAUTH_SECRET: "12345"
+          NEXTAUTH_URL: "http://localhost:3000"
 
       - name: Install FFmpeg
         run: sudo apt-get install -y ffmpeg
