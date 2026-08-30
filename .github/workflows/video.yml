@@ -1,16 +1,9 @@
-name: YumCut Video Bot
+name: Warrior Video Bot
 
 on:
   schedule:
     - cron: "0 */5 * * *"
   workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: yumcut-video-bot
-  cancel-in-progress: false
 
 jobs:
   create-video:
@@ -27,38 +20,26 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install dependencies
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg imagemagick
+          # Исправляем политику безопасности ImageMagick для работы TextClip
+          sudo sed -i 's/domain="coder" rights="none" pattern="PDF"/domain="coder" rights="read|write" pattern="PDF"/' /etc/ImageMagick-6/policy.xml
+
+      - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Check YumCut API access
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }} # Добавлено для стабильности
-          YUMCUT_BASE_URL: ${{ secrets.YUMCUT_BASE_URL }}
-          YUMCUT_API_KEY: ${{ secrets.YUMCUT_API_KEY }}
-        run: python video_bot.py --check
-
-      - name: Generate video
+      - name: Generate Video
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          YUMCUT_BASE_URL: ${{ secrets.YUMCUT_BASE_URL }}
-          YUMCUT_API_KEY: ${{ secrets.YUMCUT_API_KEY }}
-          VIDEO_DURATION_SECONDS: "60"
-          VIDEO_LANGUAGE: "ru"
         run: python video_bot.py
 
-      - name: Verify generated file
-        run: |
-          test -s output/video.mp4
-          file output/video.mp4
-          ls -lh output/video.mp4
-
-      - name: Upload video
+      - name: Upload Video
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: yumcut-video-${{ github.run_number }}
+          name: warrior-video-${{ github.run_number }}
           path: output/video.mp4
-          if-no-files-found: error
-          retention-days: 7
