@@ -1,107 +1,92 @@
-import json
 import os
 import random
 import sys
-import time
-import uuid
-from pathlib import Path
-from typing import Any
-
+import asyncio
 import requests
+from pathlib import Path
 from dotenv import load_dotenv
 from groq import Groq
+import edge_tts
+from moviepy.editor import VideoFileClip, AudioFileClip, TextClip, CompositeVideoClip, ImageClip, concatenate_videoclips
 
 load_dotenv()
 
+# Конфигурация
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-YUMCUT_BASE_URL = os.getenv("YUMCUT_BASE_URL", "https://app.yumcut.com").rstrip("/")
-YUMCUT_API_KEY = os.getenv("YUMCUT_API_KEY")
-VIDEO_DURATION_SECONDS = int(os.getenv("VIDEO_DURATION_SECONDS", "60"))
 VIDEO_LANGUAGE = os.getenv("VIDEO_LANGUAGE", "ru")
+OUTRO_IMAGE_URL = "https://app.yumcut.com/content/photo.png"
+BG_VIDEO_URL = "https://assets.mixkit.co/videos/stock/video/24044-4k-abstract-golden-particles-background.mp4" # Замени на любую ссылку на mp4
 
-TIMEOUT = 60
-POLL_SECONDS = 20
-MAX_WAIT_SECONDS = 20 * 60
-
+# Папки
+OUTPUT_DIR = Path("output")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def require_env():
-    # Проверяем, не запущен ли скрипт в режиме проверки API
-    is_check_mode = "--check" in sys.argv
-    
-    missing = []
-    # Groq не нужен, если мы только проверяем связь с YumCut
-    if not is_check_mode and not GROQ_API_KEY:
-        missing.append("GROQ_API_KEY")
-    if not YUMCUT_API_KEY:
-        missing.append("YUMCUT_API_KEY")
-        
-    if missing:
-        raise RuntimeError("Missing environment variables: " + ", ".join(missing))
+    if not GROQ_API_KEY:
+        raise RuntimeError("Missing GROQ_API_KEY")
 
-    if not YUMCUT_API_KEY.startswith("ycu_"):
-        raise RuntimeError(
-            "YUMCUT_API_KEY is not a YumCut User API key. "
-            "Create one in Account -> API keys. YumCut keys start with ycu_."
-        )
-
-
-def headers():
-    return {
-        "Authorization": f"Bearer {YUMCUT_API_KEY}",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-
-
-def print_api_error(resp, action):
-    print(f"❌ YumCut {action}: HTTP {resp.status_code}")
-    try:
-        print(json.dumps(resp.json(), ensure_ascii=False, indent=2)[:10000])
-    except Exception:
-        print(resp.text[:10000])
-
-
-def extract(obj: Any, keys: set[str]):
-    """Recursively find a value while tolerating harmless response-shape changes."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k.lower() in keys and v not in (None, ""):
-                return v
-        for v in obj.values():
-            found = extract(v, keys)
-            if found not in (None, ""):
-                return found
-    elif isinstance(obj, list):
-        for v in obj:
-            found = extract(v, keys)
-            if found not in (None, ""):
-                return found
-    return None
-
-
-def api_get(path):
-    resp = requests.get(
-        f"{YUMCUT_BASE_URL}{path}",
-        headers=headers(),
-        timeout=TIMEOUT,
+def generate_script(topic):
+    print(f"📝 Generating script for: {topic}...")
+    client = Groq(api_key=GROQ_API_KEY)
+    response = client.chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=[
+            {"role": "system", "content": "Ты сценарист Shorts. Напиши короткий, динамичный текст (до 50 секунд) на русском. Без markdown. Только текст."},
+            {"role": "user", "content": f"Тема: {topic}"},
+        ],
+        temperature=0.7,
     )
-    return resp
+    return (response.choices[0].message.content or "").strip()
 
+async def generate_audio(text):
+    print("🎙️ Generating voice-over...")
+    output_audio = OUTPUT_DIR / "voice.mp3"
+    communicate = edge_tts.Communicate(text, "ru-RU-SvetlanaNeural")
+    await communicate.save(str(output_audio))
+    return output_audio
 
-def check_api():
-    require_env()
-    print(f"🔎 Checking YumCut: {YUMCUT_BASE_URL}")
+def download_file(url, filename):
+    path = OUTPUT_DIR / filename
+    print(f"📥 Downloading {filename}...")
+    with requests.get(url, stream=True) as r:
+        with open(path, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+    return path
 
-    resp = api_get("/api/user/v1/account")
-    if resp.status_code != 200:
-        print_api_error(resp, "account check failed")
-        sys.exit(1)
-
-    data = resp.json()
-    print("✅ YumCut API authentication works.")
-    print(f"   Account: {data.get('email') or data.get('name') or data.get('id')}")
-    print(f"   Token balance: {data.get('tokenBalance')}")
-
+def create_video(script_text, audio_path):
+    print("🎬 Rendering video...")
+    
+    # 1. Загружаем ресурсы
+    bg_video_path = download_file(BG_VIDEO_URL, "background.mp4")
+    outro_img_path = download_file(OUTRO_IMAGE_URL, "outro.png")
+    
+    audio = AudioFileClip(str(audio_path))
+    bg_video = VideoFileClip(str(bg_video_path)).loop(duration=audio.duration)
+    bg_video = bg_video.set_audio(audio)
+    
+    # 2. Создаем простые субтитры (весь текст по центру)
+    # Для полноценных субтитров по словам нужен Whisper, здесь делаем базовый вариант
+    txt_clip = TextClip(
+        script_text, 
+        fontsize=70, 
+        color='white', 
+        font='Arial-Bold', 
+        method='caption', 
+        size=(bg_video.w*0.8, None)
+    ).set_duration(audio.duration).set_position('center')
+    
+    main_video = CompositeVideoClip([bg_video, txt_clip])
+    
+    # 3. Создаем Outro (фото в конце на 3 секунды)
+    outro = ImageClip(str(outro_img_path)).set_duration(3).set_fps(24)
+    
+    # Склеиваем основное видео и фото
+    final_video = concatenate_videoclips([main_video, outro])
+    
+    output_path = OUTPUT_DIR / "video.mp4"
+    final_video.write_videofile(str(output_path), fps=24, codec="libx264", audio_codec="aac")
+    return output_path
 
 def choose_topic():
     return random.choice([
@@ -109,216 +94,21 @@ def choose_topic():
         "Криптовалюты: новый пузырь или будущее денег?",
         "Как эмоции мешают зарабатывать на бирже",
         "Почему богатые инвестируют, а бедные копят",
-        "Что делать с деньгами во время рецессии",
-        "Почему деньги теряют покупательную способность",
-        "Как работает сложный процент и почему время важнее большой зарплаты",
-        "Какие финансовые ошибки люди совершают после получения первой крупной суммы",
     ])
 
-
-def generate_script(topic):
-    client = Groq(api_key=GROQ_API_KEY)
-
-    response = client.chat.completions.create(
-        model="openai/gpt-oss-120b",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Ты сценарист коротких финансовых видео. "
-                    "Напиши динамичный сценарий примерно на 60 секунд на русском языке. "
-                    "Начни с сильного hook. Структура: hook -> объяснение -> пример -> вывод. "
-                    "Не обещай доходность и не давай персональных инвестиционных рекомендаций. "
-                    "Возвращай только готовый текст сценария без markdown и комментариев."
-                ),
-            },
-            {"role": "user", "content": f"Тема: {topic}"},
-        ],
-        temperature=0.75,
-        max_completion_tokens=900,
-    )
-
-    script = (response.choices[0].message.content or "").strip()
-    if not script:
-        raise RuntimeError("Groq returned an empty script.")
-
-    return script
-
-
-def build_project_payload(title, script):
-    return {
-        "prompt": title,
-        "rawScript": script,
-        "durationSeconds": VIDEO_DURATION_SECONDS,
-        "languages": [VIDEO_LANGUAGE],
-        "projectExperience": "story",
-        "includeDefaultMusic": True,
-        "captionsEnabled": True,
-        "watermarkEnabled": False,
-        "outroImage": "https://app.yumcut.com/content/photo.png", # Добавлено фото в конец
-    }
-
-
-def create_project(title, script):
-    payload = build_project_payload(title, script)
-    idem = f"github-actions-{uuid.uuid4()}"
-
-    print("🎬 Creating YumCut project...")
-
-    resp = requests.post(
-        f"{YUMCUT_BASE_URL}/api/user/v1/projects",
-        headers={
-            **headers(),
-            "Idempotency-Key": idem,
-        },
-        json=payload,
-        timeout=TIMEOUT,
-    )
-
-    if resp.status_code not in (200, 201):
-        print_api_error(resp, "project creation failed")
-        resp.raise_for_status()
-
-    data = resp.json()
-    project_id = extract(data, {"id", "projectid", "project_id"})
-
-    if not project_id:
-        print(json.dumps(data, ensure_ascii=False, indent=2)[:10000])
-        raise RuntimeError("YumCut did not return a project ID.")
-
-    print(f"✅ Project created: {project_id}")
-    return str(project_id)
-
-
-def get_status(project_id):
-    resp = api_get(f"/api/user/v1/projects/{project_id}/status")
-
-    if resp.status_code != 200:
-        print_api_error(resp, "status request failed")
-        resp.raise_for_status()
-
-    data = resp.json()
-    status = extract(data, {"status", "projectstatus", "project_status"})
-
-    if not status:
-        raise RuntimeError(
-            "No status in YumCut response:\n"
-            + json.dumps(data, ensure_ascii=False)[:10000]
-        )
-
-    return str(status).lower(), data
-
-
-def wait_for_completion(project_id):
-    print("⏳ Waiting for video generation...")
-
-    started = time.monotonic()
-    last_status = None
-
-    success = {"completed", "complete", "done", "success", "succeeded", "finished"}
-    failure = {"failed", "failure", "error", "cancelled", "canceled", "stopped"}
-
-    while time.monotonic() - started < MAX_WAIT_SECONDS:
-        status, data = get_status(project_id)
-
-        if status != last_status:
-            print(f"   Status: {status}")
-            last_status = status
-
-        if status in success:
-            print("✅ Video generation completed.")
-            return
-
-        if status in failure:
-            print(json.dumps(data, ensure_ascii=False, indent=2)[:10000])
-            raise RuntimeError(f"YumCut generation failed: {status}")
-
-        time.sleep(POLL_SECONDS)
-
-    raise TimeoutError("YumCut generation exceeded 20 minutes.")
-
-
-def get_download_url(project_id):
-    resp = api_get(f"/api/user/v1/projects/{project_id}/downloads/video")
-
-    if resp.status_code != 200:
-        print_api_error(resp, "video download URL request failed")
-        resp.raise_for_status()
-
-    data = resp.json()
-
-    url = extract(
-        data,
-        {
-            "url",
-            "downloadurl",
-            "download_url",
-            "videourl",
-            "video_url",
-            "mediaurl",
-            "media_url",
-        },
-    )
-
-    if not url or not isinstance(url, str) or not url.startswith(("http://", "https://")):
-        print(json.dumps(data, ensure_ascii=False, indent=2)[:10000])
-        raise RuntimeError("Could not find a video download URL in YumCut response.")
-
-    return url
-
-
-def download_video(project_id, url):
-    out = Path("output/video.mp4")
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    print("📥 Downloading final MP4...")
-
-    with requests.get(url, stream=True, timeout=TIMEOUT, allow_redirects=True) as resp:
-        if resp.status_code != 200:
-            print_api_error(resp, "media download failed")
-            resp.raise_for_status()
-
-        with out.open("wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    f.write(chunk)
-
-    if not out.exists() or out.stat().st_size == 0:
-        raise RuntimeError("Downloaded video file is empty.")
-
-    print(f"✅ Saved: {out} ({out.stat().st_size / 1024 / 1024:.2f} MB)")
-
-
-def main():
-    if "--check" in sys.argv:
-        check_api()
-        return
-
+async def main():
     require_env()
-    check_api()
-
+    
     topic = choose_topic()
-    print(f"📌 Topic: {topic}")
-
     script = generate_script(topic)
-    print("📝 Script generated.")
-    print(f"   Characters: {len(script)}")
-
-    project_id = create_project(topic, script)
-    wait_for_completion(project_id)
-
-    download_url = get_download_url(project_id)
-    download_video(project_id, download_url)
-
-    print("🎉 DONE")
-
+    audio_path = await generate_audio(script)
+    create_video(script, audio_path)
+    
+    print("🎉 DONE! Video created at output/video.mp4")
 
 if __name__ == "__main__":
     try:
-        main()
-    except KeyboardInterrupt:
-        print("\n❌ Interrupted.")
-        sys.exit(130)
-    except Exception as exc:
-        print(f"\n❌ ERROR: {exc}")
+        asyncio.run(main())
+    except Exception as e:
+        print(f"❌ ERROR: {e}")
         sys.exit(1)
