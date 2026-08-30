@@ -29,6 +29,8 @@ jobs:
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
+          # Важно: Pillow ниже 10.0.0 исправляет ошибку ANTIALIAS в MoviePy
+          pip install "Pillow<10.0.0"
           pip install moviepy==1.0.3 edge-tts groq requests python-dotenv
 
       - name: Generate Smart Video
